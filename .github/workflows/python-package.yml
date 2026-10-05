@@ -12,7 +12,7 @@ on:
 jobs:
   build:
 
-    runs-on: ol-base-parproc
+    runs-on: ol-base-oivindloe-light
     strategy:
       fail-fast: false
       matrix:
