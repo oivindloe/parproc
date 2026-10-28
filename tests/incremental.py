@@ -789,6 +789,9 @@ class TestWatch(IncrementalBaseTest):
             def start(self) -> None:
                 return
 
+            def invalidate_git_changes(self) -> None:
+                return
+
             def wait_for_changes(self, timeout: float | None = None) -> tuple[set[str], set[str]]:
                 del timeout
                 self._calls += 1

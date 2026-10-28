@@ -15,7 +15,7 @@ class ProcState(Enum):
     FAILED = 4
     FAILED_DEP = 5  # Canceled because a dependency is missing or failed
     SKIPPED = 6  # Proc raised ProcSkippedError; counts as success for dependencies
-    UP_TO_DATE = 7  # Auto-skipped by framework; inputs unchanged since last cached result
+    UP_TO_DATE = 7  # Auto-skipped; mtime inputs match the cached result, or git inputs match their ref
 
 
 SUCCEEDED_STATES = {ProcState.SUCCEEDED, ProcState.SKIPPED, ProcState.UP_TO_DATE}
@@ -96,6 +96,35 @@ class Output:
     file: str
     max_age: DurationSpec | None = None
     enforce_freshness: bool = True
+
+
+@dataclass(frozen=True)
+class Input:
+    """File input specification for a proc.
+
+    A plain string in ``inputs`` is shorthand for ``Input(file)`` with no git ref.
+    ``changed_since`` applies only to that entry: other inputs on the same proc keep
+    modification-time staleness.
+
+    Attributes:
+        file: File path, directory, or glob pattern.
+        changed_since: Optional git ref (for example ``origin/main``). When set, the
+            input is stale if it differs from that ref: commits since the merge base
+            with ``HEAD``, plus staged, unstaged, and untracked paths. When omitted,
+            staleness uses the task DB modification-time fingerprint.
+    """
+
+    file: str
+    changed_since: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.file, str) or self.file == '':
+            raise UserError('Input.file must be a non-empty string.')
+        if self.changed_since is None:
+            return
+        if not isinstance(self.changed_since, str) or self.changed_since.strip() == '':
+            raise UserError(f'Input.changed_since must be a non-empty git ref or None, got {self.changed_since!r}.')
+        object.__setattr__(self, 'changed_since', self.changed_since.strip())
 
 
 _DURATION_UNITS: Final[dict[str, float]] = {

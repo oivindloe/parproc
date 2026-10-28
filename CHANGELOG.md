@@ -3,6 +3,12 @@
 All notable user-facing changes to parproc will be documented in this file.
 
 
+## [Unreleased]
+
+### Added
+- `pp.Input(file, changed_since=ref)` compares that input to a git ref (`ref...HEAD`, plus dirty and untracked paths) instead of the task DB modification-time fingerprint. Other inputs on the same proc stay on modification times. The diff for each repository and ref is cached for the run.
+
+
 ## [0.7.1]
 
 ### Fixed

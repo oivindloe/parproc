@@ -367,11 +367,33 @@ def build(ctx: pp.ProcContext, target: str) -> dict:
     ...
 ```
 
-- **`inputs`** -- file paths, glob patterns, or callables that return lists of paths. Used for staleness detection: if any input file is newer than the cached result, the proc re-runs. Glob patterns (e.g. `src/**/*.ts`) are expanded at check time.
+- **`inputs`** -- file paths, glob patterns, `pp.Input(...)` specs, or callables that return those. A plain string is a modification-time input: if any input file is newer than the cached result, the proc re-runs. Glob patterns (e.g. `src/**/*.ts`) are expanded at check time. `pp.Input(file, changed_since='origin/main')` is compared to that git ref instead of the task DB. Each entry chooses its own check, so one proc can mix both.
 - **`outputs`** -- file paths (strings), `pp.Output(...)` specs, or callables returning either. After a proc runs, the framework verifies that all declared output files exist. If any are missing, the proc is marked **FAILED** with error `ERROR_OUTPUTS_NOT_REFRESHED`.
 - **`pp.Output(file=..., max_age=..., enforce_freshness=...)`** -- per-output policy. `max_age` is optional; when set, the output must be newer than `now - max_age` during incremental stale checks. Post-run, this freshness check is enforced when `enforce_freshness=True` (default). Set `enforce_freshness=False` when the tool may legitimately no-op and leave an existing output file older than `max_age`. `max_age` accepts seconds (`int`/`float`), `datetime.timedelta`, or strings like `4s`, `4m`, `4h`, `4d`, `4 seconds`, `4 minutes`, `4 days`.
 
-Both accept a list of strings, a single callable, or a list mixing strings and callables. Callables receive the same `DepProcContext` and keyword args as dependency lambdas.
+Both accept a list of strings, a single callable, or a list mixing strings and callables. `inputs` may also contain `pp.Input` specs. Callables receive the same `DepProcContext` and keyword args as dependency lambdas.
+
+### Comparing an input to a git ref
+
+`pp.Input(..., changed_since=ref)` is stale when that path differs from `ref`. The comparison is `git diff ref...HEAD` (changes on this branch since the merge base) plus staged, unstaged, and untracked files. It does not use file modification times, so a fresh worktree can still skip untouched paths.
+
+```python
+@pp.Proto(
+    name='check::[pkg]',
+    inputs=lambda ctx, pkg: [
+        pp.Input(f'packages/{pkg}/**', changed_since='origin/main'),
+        f'generated/{pkg}/schema.json',
+    ],
+)
+def check(ctx: pp.ProcContext, pkg: str) -> None:
+    ...
+```
+
+- The proc runs if any input is stale, or if a dependency actually ran. `no_skip=True` and `run(..., full=True)` still force it.
+- Entries with `changed_since` can be `UP_TO_DATE` on the first run when the diff does not touch them, including when declared outputs are absent. That skip does not reload a cached return value.
+- Plain strings in the same list still use the task DB fingerprint. On a fresh checkout those entries make the proc run until a result is cached.
+- The changed-path set for each repository and ref is cached for the run, the same way file modification times are cached, and dropped on the next `run()` or when a watched path changes.
+- `inputs_ignore` / `global_inputs_ignore` still apply. Imported Python modules inherit the `changed_since` ref of the `.py` input that imported them.
 
 ### Following Python imports
 

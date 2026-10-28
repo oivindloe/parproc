@@ -17,6 +17,7 @@ except ImportError:
 from .types import (
     FAILED_STATES,
     SUCCEEDED_STATES,
+    Input,
     LogIssueRule,
     Output,
     ProcessError,
@@ -31,7 +32,63 @@ logger = logging.getLogger('par')
 
 F = TypeVar('F', bound=Callable[..., Any])
 FileSpec = str | Callable[..., list[str]]
+InputItem = str | Input
+InputSpec = InputItem | Callable[..., Sequence[InputItem]]
 OutputFileSpec = str | Output | Callable[..., list[str | Output]]
+
+
+def normalize_input_specs(
+    inputs: Sequence[InputSpec] | InputItem | Callable[..., Sequence[InputItem]] | None,
+    *,
+    label: str,
+) -> list[InputSpec] | None:
+    """Normalize ``inputs`` to a list of paths, ``Input`` specs, or callables."""
+    if inputs is None:
+        return None
+    specs: Sequence[InputSpec]
+    if isinstance(inputs, (str, Input)):
+        specs = [inputs]
+    elif callable(inputs):
+        return [inputs]
+    else:
+        specs = inputs
+    normalized = list(specs)
+    for spec in normalized:
+        if isinstance(spec, str):
+            if spec == '':
+                raise UserError(f'{label} paths must be non-empty strings.')
+            continue
+        if isinstance(spec, Input):
+            continue
+        if callable(spec):
+            continue
+        raise UserError(f'{label} must contain str, Input, or callable values, got {type(spec).__name__!r}.')
+    return normalized
+
+
+def normalize_ignore_specs(
+    inputs_ignore: Sequence[FileSpec] | Callable[..., list[str]] | None,
+    *,
+    label: str,
+) -> list[FileSpec] | None:
+    """Normalize ignore specs. ``Input`` is rejected; ignore entries are paths only."""
+    if inputs_ignore is None:
+        return None
+    if isinstance(inputs_ignore, Input):
+        raise UserError(f'{label} entries are paths or callables, not Input specs.')
+    if isinstance(inputs_ignore, str):
+        return [inputs_ignore]
+    if callable(inputs_ignore):
+        return [inputs_ignore]
+    normalized = list(inputs_ignore)
+    for spec in normalized:
+        if isinstance(spec, Input):
+            raise UserError(f'{label} entries are paths or callables, not Input specs.')
+        if isinstance(spec, str) or callable(spec):
+            continue
+        raise UserError(f'{label} must contain str or callable values, got {type(spec).__name__!r}.')
+    return normalized
+
 
 if TYPE_CHECKING:
     from .par import Proto
@@ -151,7 +208,7 @@ class Proc:
         timeout: float | None = None,
         wave: int = 0,
         special_deps: list[SpecialDep] | None = None,
-        inputs: Sequence[FileSpec] | Callable[..., list[str]] | None = None,
+        inputs: Sequence[InputSpec] | InputItem | Callable[..., Sequence[InputItem]] | None = None,
         inputs_ignore: Sequence[FileSpec] | Callable[..., list[str]] | None = None,
         outputs: Sequence[OutputFileSpec] | Callable[..., list[str | Output]] | None = None,
         log_ignore: list[str | LogIssueRule] | str | LogIssueRule | None = None,
@@ -178,20 +235,8 @@ class Proc:
         self.proto = proto
         self.timeout = timeout
         self.wave = proto.wave if proto is not None else wave
-        normalized_inputs: list[FileSpec] | None
-        if callable(inputs):
-            normalized_inputs = [inputs]
-        elif inputs is None:
-            normalized_inputs = None
-        else:
-            normalized_inputs = list(inputs)
-        normalized_inputs_ignore: list[FileSpec] | None
-        if callable(inputs_ignore):
-            normalized_inputs_ignore = [inputs_ignore]
-        elif inputs_ignore is None:
-            normalized_inputs_ignore = None
-        else:
-            normalized_inputs_ignore = list(inputs_ignore)
+        normalized_inputs = normalize_input_specs(inputs, label='Proc inputs')
+        normalized_inputs_ignore = normalize_ignore_specs(inputs_ignore, label='Proc inputs_ignore')
         normalized_outputs: list[OutputFileSpec] | None
         if callable(outputs):
             normalized_outputs = [outputs]

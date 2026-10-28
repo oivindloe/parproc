@@ -17,6 +17,8 @@ from watchdog.observers import Observer
 from watchdog.observers.api import BaseObserver
 from watchdog.observers.polling import PollingObserver
 
+from .gitdiff import GitChangeCache, load_changed_paths, resolve_repo_root
+
 logger = logging.getLogger('par')
 
 
@@ -112,6 +114,7 @@ class FileWatcher:
         self._proc_ignore_globs: dict[str, list[str]] = {}
         self._mtime_cache: dict[str, float] = {}
         self._missing_cache: set[str] = set()
+        self._git_changes = GitChangeCache()
         self._handler = _ChangeHandler(
             self._path_to_procs,
             self._lock,
@@ -162,6 +165,8 @@ class FileWatcher:
         stale_missing = [p for p in self._missing_cache if self._is_subpath(p, changed_path)]
         for stale_path in stale_missing:
             self._missing_cache.discard(stale_path)
+        # A file change can alter the worktree diff, so the next changed_since check reloads it.
+        self._git_changes.clear_changed()
 
     def add_proc_inputs(
         self,
@@ -238,6 +243,31 @@ class FileWatcher:
                 self._mtime_cache.pop(normalized_path, None)
                 self._missing_cache.discard(normalized_path)
             return self._path_mtime(normalized_path)
+
+    def invalidate_git_changes(self) -> None:
+        """Drop cached git diffs so the next ``changed_since`` check runs git again."""
+        with self._lock:
+            self._git_changes.clear_changed()
+
+    def git_repo_root(self, start: str) -> str:
+        """Return the git toplevel containing ``start``, caching the rev-parse result."""
+        with self._lock:
+            cached = self._git_changes.peek_root(start)
+        if cached is not None:
+            return cached
+        root = resolve_repo_root(start)
+        with self._lock:
+            return self._git_changes.store_root(start, root)
+
+    def changed_paths_since(self, repo_root: str, ref: str) -> frozenset[str]:
+        """Paths changed vs ``ref`` in ``repo_root``. One git load per ref until invalidated."""
+        with self._lock:
+            cached, generation = self._git_changes.cached_changed(repo_root, ref)
+        if cached is not None:
+            return cached
+        loaded = load_changed_paths(repo_root, ref)
+        with self._lock:
+            return self._git_changes.store_changed(repo_root, ref, loaded, generation)
 
     def compute_fingerprint(self, paths: list[str], ignored_paths: list[str] | None = None) -> dict[str, float]:
         """Map each concrete file path to mtime_ns using cached stats."""

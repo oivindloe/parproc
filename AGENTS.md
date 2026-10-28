@@ -22,7 +22,7 @@ Run the full test suite:
 bash scripts/test.sh
 ```
 
-This runs all test modules (`tests.simple`, `tests.proto`, `tests.errorformat`, `tests.conditional_rdeps`) in both multiprocessing and single-process modes via `uv run python -m unittest`.
+This runs all test modules (`tests.simple`, `tests.proto`, `tests.errorformat`, `tests.conditional_rdeps`, `tests.incremental`, `tests.python_imports`, `tests.changed_since`) in both multiprocessing and single-process modes via `uv run python -m unittest`.
 
 To run a specific test module:
 
