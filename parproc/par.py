@@ -27,13 +27,21 @@ except ImportError:
     pass
 
 from . import task_db
+from .gitdiff import path_matches_spec
 from .imports import PythonImportResolver
-from .proc import Proc, ProcContext
+from .proc import (
+    InputSpec,
+    Proc,
+    ProcContext,
+    normalize_ignore_specs,
+    normalize_input_specs,
+)
 from .runner import MultiProcessRunner, SingleProcessRunner
 from .term import TermDynamic, TermSimple
 from .types import (
     FAILED_STATES,
     SUCCEEDED_STATES,
+    Input,
     LogIssueRule,
     Output,
     ProcessError,
@@ -63,6 +71,7 @@ DepSpec = str
 DepSpecOrList = Union[str, list[str]]
 DepInput = Union[str, Callable[..., DepSpecOrList]]
 FileSpec = str | Callable[..., list[str]]
+InputItem = str | Input
 OutputFile = str | Output
 OutputSpec = OutputFile | Callable[..., list[OutputFile]]
 ArgChoices = dict[str, Sequence[Any]]
@@ -134,6 +143,14 @@ class ResolvedOutput:
     enforce_freshness: bool
 
 
+@dataclass(frozen=True)
+class ResolvedInput:
+    """One resolved input path and the git ref that gates it, if any."""
+
+    path: str
+    changed_since: str | None = None
+
+
 class ProcManager:  # pylint: disable=too-many-public-methods
 
     inst: Optional['ProcManager'] = None  # Singleton instance
@@ -163,6 +180,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         self.watch = False
         self.watch_debounce_seconds = 0.3
         self._full: bool = False
+        self._load_cached_on_skip = True
         self._file_watcher = FileWatcher(watch_enabled=False, change_grace_period_seconds=self.watch_debounce_seconds)
 
     def clear(self) -> None:
@@ -286,6 +304,8 @@ class ProcManager:  # pylint: disable=too-many-public-methods
                 normalized_global_inputs_ignore = list(global_inputs_ignore)
             if normalized_global_inputs_ignore is not None:
                 for spec in normalized_global_inputs_ignore:
+                    if isinstance(spec, Input):
+                        raise UserError('global_inputs_ignore entries are paths or callables, not Input specs.')
                     if not isinstance(spec, str) and not callable(spec):
                         raise UserError(
                             f'global_inputs_ignore must contain str or callable values, got {type(spec).__name__!r}.'
@@ -776,30 +796,57 @@ class ProcManager:  # pylint: disable=too-many-public-methods
 
     # --- Incremental / staleness logic ---
 
-    def _resolve_file_specs(self, specs: list[str | Callable[..., list[str]]], proc: 'Proc') -> list[str]:
-        """Resolve a list of file specs (strings or callables) to concrete paths.
+    def _invoke_input_callable(self, spec: Callable[..., Sequence[InputItem]], proc: 'Proc') -> list[InputItem]:
+        """Call an input callable with DepProcContext and matching proc args."""
+        dep_context = DepProcContext(
+            proc_name=proc.name or '',
+            params=self.context['params'],
+            args=proc.args,
+        )
+        sig = inspect.signature(spec)
+        param_names = list(sig.parameters.keys())
+        if param_names:
+            param_names = param_names[1:]
+        filtered = {k: v for k, v in proc.args.items() if k in param_names}
+        result = spec(dep_context, **filtered)
+        if isinstance(result, (str, Input)) or not isinstance(result, Sequence):
+            raise UserError('input callables must return a list of str or Input values.')
+        return list(result)
+
+    def _flatten_input_items(self, specs: Sequence[InputSpec], proc: 'Proc') -> list[InputItem]:
+        """Expand input callables to a flat list of paths and ``Input`` specs."""
+        items: list[InputItem] = []
+        for spec in specs:
+            if isinstance(spec, str):
+                items.append(spec)
+                continue
+            if isinstance(spec, Input):
+                items.append(spec)
+                continue
+            if not callable(spec):
+                raise UserError(f'inputs must contain str, Input, or callable values, got {type(spec).__name__!r}.')
+            for item in self._invoke_input_callable(spec, proc):
+                if isinstance(item, str):
+                    items.append(item)
+                    continue
+                if isinstance(item, Input):
+                    items.append(item)
+                    continue
+                raise UserError(
+                    f'input callables must return str or Input values, got {type(item).__name__!r}.',
+                )
+        return items
+
+    def _resolve_file_specs(self, specs: Sequence[InputSpec], proc: 'Proc') -> list[str]:
+        """Resolve a list of file specs (strings, Input, or callables) to concrete paths.
 
         Callables receive DepProcContext + filtered args (same convention as dep lambdas).
         Glob patterns (e.g. ``src/**/*.ts``) are expanded to matching files. Use
         :func:`regex_files` for regular-expression-based listings under one directory.
+        ``Input.changed_since`` is ignored here; callers that need it use
+        :meth:`_resolve_policy_inputs`.
         """
-        raw_paths: list[str] = []
-        for spec in specs:
-            if isinstance(spec, str):
-                raw_paths.append(spec)
-            else:
-                dep_context = DepProcContext(
-                    proc_name=proc.name or '',
-                    params=self.context['params'],
-                    args=proc.args,
-                )
-                sig = inspect.signature(spec)
-                param_names = list(sig.parameters.keys())
-                if param_names:
-                    param_names = param_names[1:]
-                filtered = {k: v for k, v in proc.args.items() if k in param_names}
-                result = spec(dep_context, **filtered)
-                raw_paths.extend(result)
+        raw_paths = [item.file if isinstance(item, Input) else item for item in self._flatten_input_items(specs, proc)]
 
         resolved: list[str] = []
         for p in raw_paths:
@@ -809,25 +856,9 @@ class ProcManager:  # pylint: disable=too-many-public-methods
                 resolved.append(p)
         return resolved
 
-    def _resolve_watch_specs(self, specs: list[str | Callable[..., list[str]]], proc: 'Proc') -> list[str]:
+    def _resolve_watch_specs(self, specs: Sequence[InputSpec], proc: 'Proc') -> list[str]:
         """Resolve file specs to watch roots/paths (keep glob roots as directories)."""
-        raw_paths: list[str] = []
-        for spec in specs:
-            if isinstance(spec, str):
-                raw_paths.append(spec)
-            else:
-                dep_context = DepProcContext(
-                    proc_name=proc.name or '',
-                    params=self.context['params'],
-                    args=proc.args,
-                )
-                sig = inspect.signature(spec)
-                param_names = list(sig.parameters.keys())
-                if param_names:
-                    param_names = param_names[1:]
-                filtered = {k: v for k, v in proc.args.items() if k in param_names}
-                result = spec(dep_context, **filtered)
-                raw_paths.extend(result)
+        raw_paths = [item.file if isinstance(item, Input) else item for item in self._flatten_input_items(specs, proc)]
 
         watch_paths: list[str] = []
         for path in raw_paths:
@@ -912,16 +943,105 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         return result
 
     def _resolve_inputs(self, proc: 'Proc') -> list[str]:
-        """Resolve input globs/callables to concrete file paths."""
+        """Concrete modification-time input paths.
+
+        ``Input(..., changed_since=...)`` entries are omitted. Those are compared
+        to a git ref instead of the task DB fingerprint.
+        """
+        return [entry.path for entry in self._resolve_policy_inputs(proc) if entry.changed_since is None]
+
+    def _resolve_policy_inputs(self, proc: 'Proc') -> list[ResolvedInput]:
+        """Resolve inputs, keeping each path's ``changed_since`` ref.
+
+        Git-gated globs stay as patterns so deletions still match the diff.
+        Modification-time globs are expanded to concrete files. Imported Python
+        modules inherit the ref of the input that pulled them in.
+        """
         if proc.inputs is None:
             return []
-        resolved = self._resolve_file_specs(proc.inputs, proc)
-        if self._should_track_imports(proc):
-            resolved = self._expand_python_imports(resolved)
-        effective_ignore_specs = self._effective_inputs_ignore_specs(proc)
-        if effective_ignore_specs is None:
-            return resolved
-        return self._exclude_ignored_specs(resolved, effective_ignore_specs, proc)
+        resolved: list[ResolvedInput] = []
+        for item in self._flatten_input_items(proc.inputs, proc):
+            path = item.file if isinstance(item, Input) else item
+            ref = item.changed_since if isinstance(item, Input) else None
+            if ref is not None or not globmod.has_magic(path):
+                resolved.append(ResolvedInput(path=path, changed_since=ref))
+                continue
+            resolved.extend(
+                ResolvedInput(path=match, changed_since=None) for match in sorted(globmod.glob(path, recursive=True))
+            )
+        self._append_import_inputs(resolved, proc)
+        return self._apply_input_ignores(resolved, proc)
+
+    def _append_import_inputs(self, resolved: list[ResolvedInput], proc: 'Proc') -> None:
+        """Add first-party Python imports, inheriting ``changed_since`` from the importer."""
+        if not self._should_track_imports(proc):
+            return
+        resolver = self._get_import_resolver()
+        seen = {
+            (os.path.abspath(entry.path), entry.changed_since)
+            for entry in resolved
+            if not globmod.has_magic(entry.path)
+        }
+        extras: list[ResolvedInput] = []
+        for entry in list(resolved):
+            candidates: list[str]
+            if globmod.has_magic(entry.path):
+                if entry.changed_since is None:
+                    continue
+                candidates = [match for match in globmod.glob(entry.path, recursive=True) if match.endswith('.py')]
+            elif entry.path.endswith('.py'):
+                candidates = [entry.path]
+            else:
+                continue
+            for py_path in candidates:
+                for dep in resolver.transitive_deps(py_path):
+                    key = (os.path.abspath(dep), entry.changed_since)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    extras.append(ResolvedInput(path=dep, changed_since=entry.changed_since))
+        resolved.extend(extras)
+
+    def _apply_input_ignores(self, entries: list[ResolvedInput], proc: 'Proc') -> list[ResolvedInput]:
+        """Drop concrete inputs matched by ``inputs_ignore``. Git globs are filtered at match time."""
+        ignore_specs = self._effective_inputs_ignore_specs(proc)
+        if ignore_specs is None:
+            return entries
+        patterns = [entry for entry in entries if entry.changed_since is not None and globmod.has_magic(entry.path)]
+        concrete = [entry for entry in entries if entry not in patterns]
+        kept_paths = set(self._exclude_ignored_specs([entry.path for entry in concrete], ignore_specs, proc))
+        kept_concrete = [entry for entry in concrete if entry.path in kept_paths]
+        return kept_concrete + patterns
+
+    def _git_probe_dir(self, path: str) -> str:
+        """Directory used to locate the git toplevel for an input path or glob."""
+        probe = self._glob_root_for_pattern(path) if globmod.has_magic(path) else path
+        if os.path.isdir(probe):
+            return probe
+        parent = os.path.dirname(probe)
+        return parent or '.'
+
+    def _filter_changed_paths(self, changed: frozenset[str], proc: 'Proc') -> frozenset[str]:
+        """Remove changed paths that this proc's input ignore list excludes."""
+        ignore_specs = self._effective_inputs_ignore_specs(proc)
+        if ignore_specs is None:
+            return changed
+        return frozenset(self._exclude_ignored_specs(list(changed), ignore_specs, proc))
+
+    def _git_entries_changed(self, entries: list[ResolvedInput], proc: 'Proc') -> bool:
+        """True when any ``changed_since`` input differs from its git ref."""
+        groups: dict[tuple[str, str], list[ResolvedInput]] = {}
+        for entry in entries:
+            ref = entry.changed_since
+            if ref is None:
+                continue
+            root = self._file_watcher.git_repo_root(self._git_probe_dir(entry.path))
+            groups.setdefault((root, ref), []).append(entry)
+        for (root, ref), group in groups.items():
+            changed = self._filter_changed_paths(self._file_watcher.changed_paths_since(root, ref), proc)
+            if any(path_matches_spec(entry.path, changed) for entry in group):
+                return True
+        return False
 
     def _effective_inputs_ignore_specs(self, proc: 'Proc') -> list[str | Callable[..., list[str]]] | None:
         """Return proc-local inputs_ignore plus global_inputs_ignore from manager options."""
@@ -1098,29 +1218,44 @@ class ProcManager:  # pylint: disable=too-many-public-methods
             return True
         if proc.no_skip:
             return True
-        if self.task_db_path is None:
-            return True
 
         # Auto-skip only makes sense when we have at least one input source
-        # (dependency proc and/or resolved file input) to assess staleness from.
+        # (dependency proc, mtime file input, and/or git ref input) to assess staleness from.
         has_dep_inputs = any(isinstance(dep, str) for dep in proc.deps)
-        resolved_inputs: list[str] = []
-        if proc.inputs is not None:
-            resolved_inputs = self._resolve_inputs(proc)
-        has_file_inputs = len(resolved_inputs) > 0
-        if not has_dep_inputs and not has_file_inputs:
+        entries = self._resolve_policy_inputs(proc) if proc.inputs is not None else []
+        git_entries = [entry for entry in entries if entry.changed_since is not None]
+        mtime_paths = [entry.path for entry in entries if entry.changed_since is None]
+        has_git_inputs = len(git_entries) > 0
+        has_mtime_inputs = len(mtime_paths) > 0
+        if not has_dep_inputs and not has_mtime_inputs and not has_git_inputs:
             return True
 
         deps_changed, _ = self._deps_changed_for_proc(proc)
         if deps_changed:
             return True
 
+        if has_git_inputs and self._git_entries_changed(git_entries, proc):
+            return True
+
+        # Mtime inputs and dep-only procs still need the task DB. A proc whose
+        # file inputs are all changed_since can skip with no cached row, and that
+        # skip does not reload a previous return value.
+        needs_record = has_mtime_inputs or (has_dep_inputs and not has_git_inputs)
+        self._load_cached_on_skip = needs_record
+        if not needs_record:
+            return False
+        if self.task_db_path is None:
+            return True
+        return self._cached_result_stale(proc, mtime_paths)
+
+    def _cached_result_stale(self, proc: 'Proc', mtime_paths: list[str]) -> bool:
+        """True when the task DB has no matching mtime fingerprint or outputs are missing."""
         cached = task_db.load_result(proc.name or '')
         if cached is None:
             return True
 
-        if has_file_inputs:
-            current_fp = self._compute_fingerprint(resolved_inputs)
+        if mtime_paths:
+            current_fp = self._compute_fingerprint(mtime_paths)
             if current_fp != cached.input_fingerprint:
                 return True
 
@@ -1143,7 +1278,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
 
     def _auto_skip_proc(self, proc: 'Proc') -> None:
         """Skip proc as UP_TO_DATE: load cached result into context['results'], set state."""
-        cached = task_db.load_result(proc.name or '')
+        cached = task_db.load_result(proc.name or '') if self._load_cached_on_skip else None
         proc.state = ProcState.UP_TO_DATE
         proc.error = Proc.ERROR_NONE
         proc.output = cached.output if cached is not None else None
@@ -2402,7 +2537,7 @@ class Proto:
         timeout: float | None = None,
         wave: int = 0,
         arg_choices: ArgChoices | ArgChoicesFn | None = None,
-        inputs: Sequence[FileSpec] | Callable[..., list[str]] | None = None,
+        inputs: Sequence[InputSpec] | InputItem | Callable[..., Sequence[InputItem]] | None = None,
         inputs_ignore: Sequence[FileSpec] | Callable[..., list[str]] | None = None,
         outputs: Sequence[OutputSpec] | Callable[..., list[OutputFile]] | None = None,
         log_ignore: list[str | LogIssueRule] | str | LogIssueRule | None = None,
@@ -2438,20 +2573,8 @@ class Proto:
             self.arg_choices = dict(arg_choices)
         # special_deps are stored inside deps; extracted when resolving
         self.special_deps: list[SpecialDep] = [d for d in _deps if isinstance(d, SpecialDep)]
-        normalized_inputs: list[FileSpec] | None
-        if callable(inputs):
-            normalized_inputs = [inputs]
-        elif inputs is None:
-            normalized_inputs = None
-        else:
-            normalized_inputs = list(inputs)
-        normalized_inputs_ignore: list[FileSpec] | None
-        if callable(inputs_ignore):
-            normalized_inputs_ignore = [inputs_ignore]
-        elif inputs_ignore is None:
-            normalized_inputs_ignore = None
-        else:
-            normalized_inputs_ignore = list(inputs_ignore)
+        normalized_inputs = normalize_input_specs(inputs, label='Proto inputs')
+        normalized_inputs_ignore = normalize_ignore_specs(inputs_ignore, label='Proto inputs_ignore')
         normalized_outputs: list[OutputSpec] | None
         if callable(outputs):
             normalized_outputs = [outputs]
@@ -2670,6 +2793,8 @@ def run(proto_name: str, proc_name: str | None = None, *, full: bool = False, **
     """
     mgr = ProcManager.get_inst()
     mgr._full = full  # pylint: disable=protected-access
+    # Diffs are shared by every proc started from this call, then reloaded next run.
+    mgr._file_watcher.invalidate_git_changes()  # pylint: disable=protected-access
     if kwargs:
         proto_name = _fill_proto_pattern(proto_name, kwargs)
         proc_name = None
@@ -2756,6 +2881,7 @@ def watch(*watch_names: str) -> None:  # pylint: disable=too-many-branches
                 f'{dirty_proc_lines}'
             )
             mgr._full = False  # pylint: disable=protected-access
+            mgr._file_watcher.invalidate_git_changes()  # pylint: disable=protected-access
             mgr._mark_dirty(*dirty_procs)  # pylint: disable=protected-access
 
             # Reset dirty procs to IDLE so they can be re-scheduled
