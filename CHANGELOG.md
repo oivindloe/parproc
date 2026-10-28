@@ -3,10 +3,12 @@
 All notable user-facing changes to parproc will be documented in this file.
 
 
-## [Unreleased]
+## [0.8.0]
 
 ### Added
-- `pp.Input(file, changed_since=ref)` compares that input to a git ref (`ref...HEAD`, plus dirty and untracked paths) instead of the task DB modification-time fingerprint. Other inputs on the same proc stay on modification times. The diff for each repository and ref is cached for the run.
+- `pp.Input(file, changed_since=ref)` compares that input to a git ref (`git diff ref...HEAD`, plus staged, unstaged, and untracked paths) instead of the task DB modification-time fingerprint. Other inputs on the same proc stay on modification times.
+- The changed-path set for each repository and ref is cached for the run and dropped on the next `run()` or when a watched path changes.
+- A proc whose file inputs all use `changed_since` can skip on a fresh worktree when those paths are absent from the diff, without a task DB row. That skip does not reload a cached return value. Imported Python modules inherit the `changed_since` ref of the `.py` input that imported them.
 
 
 ## [0.7.1]

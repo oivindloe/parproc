@@ -8,7 +8,7 @@ when a watched path changes or when a new ``run()`` starts.
 import fnmatch
 import glob as globmod
 import os
-import subprocess
+import subprocess  # nosec B404
 from collections.abc import Callable
 
 from .types import UserError
@@ -55,7 +55,7 @@ def parse_name_status(text: str) -> list[str]:
 def _run_git(repo_root: str, *args: str) -> str:
     command = ['git', '-C', repo_root, '-c', 'core.quotepath=false', *args]
     try:
-        result = subprocess.run(command, check=False, capture_output=True, text=True)
+        result = subprocess.run(command, check=False, capture_output=True, text=True)  # nosec B603
     except OSError as exc:
         raise UserError(f'Failed to run git: {exc}') from exc
     if result.returncode != 0:
@@ -76,7 +76,7 @@ def resolve_repo_root(start: str) -> str:
     if not os.path.isdir(current):
         raise UserError(f'Input path {start} is not inside a git repository, so changed_since cannot be resolved.')
     try:
-        result = subprocess.run(
+        result = subprocess.run(  # nosec B603 B607
             ['git', '-C', current, 'rev-parse', '--show-toplevel'],
             check=False,
             capture_output=True,
