@@ -3,7 +3,7 @@
 # pylint: disable=unused-argument,protected-access
 
 import os
-import subprocess
+import subprocess  # nosec B404
 import tempfile
 import time
 import unittest
@@ -109,7 +109,7 @@ class ChangedSinceTest(unittest.TestCase):
         pp.clear()
 
     def _git(self, *args: str) -> None:
-        result = subprocess.run(
+        result = subprocess.run(  # nosec B603 B607
             [
                 'git',
                 '-c',
