@@ -85,7 +85,7 @@ def build(context: pp.ProcContext, env: str) -> str:
     return f'built_{env}'
 ```
 
-The separator between placeholders defaults to `::` and can be changed via `pp.set_options(name_param_separator='...')`.
+The separator between placeholders defaults to `::` and can be changed via `pp.set_options(name_param_separator='...')`. Each placeholder, including the last, matches one non-empty segment that does not contain the separator, so `build::[env]` matches `build::prod` but not `build::prod::extra`.
 
 ### Creating procs from protos
 
