@@ -310,6 +310,7 @@ class RdepExtractFromPatternTest(TestCase):
         )
         self.assertIsNone(self.manager._extract_from_rdep_pattern('B::[a]::[b]', 'B::test'))
         self.assertIsNone(self.manager._extract_from_rdep_pattern('B::[a]::[b]', 'C::test::2'))
+        self.assertIsNone(self.manager._extract_from_rdep_pattern('B::[a]::[b]', 'B::test::2::3'))
 
     def test_extract_literal_first(self):
         """Pattern B::1::[b]: literal first, extract second segment."""
@@ -390,9 +391,8 @@ class RdepPatternMatchingTest(TestCase):
         self.assertTrue(self.manager._match_rdep_pattern('B::[a]', 'B::test'))
         self.assertTrue(self.manager._match_rdep_pattern('B::[a]', 'B::123'))
         self.assertFalse(self.manager._match_rdep_pattern('B::[a]', 'C::test'))
-        # Note: B::[a] with last param uses .* which matches everything, so B::test::extra would match
-        # This is expected behavior - the last placeholder matches to the end
-        # If you want to restrict it, use a pattern like B::[a]::[b] instead
+        # The last placeholder is one segment, like the others
+        self.assertFalse(self.manager._match_rdep_pattern('B::[a]', 'B::test::extra'))
 
     def test_match_two_placeholders(self):
         """Test matching pattern with two placeholders"""
@@ -476,9 +476,8 @@ class RdepPatternMatchingTest(TestCase):
         """Test various edge cases"""
         # Single character
         self.assertTrue(self.manager._match_rdep_pattern('A::[x]', 'A::x'))
-        # A::[x] with last param uses .* which matches empty string too, so A:: would match
-        # This is expected behavior for the last placeholder
-        self.assertTrue(self.manager._match_rdep_pattern('A::[x]', 'A::'))
+        # The last placeholder needs at least one character, like the others
+        self.assertFalse(self.manager._match_rdep_pattern('A::[x]', 'A::'))
 
         # Very long placeholder match
         long_name = 'B::' + 'x' * 100 + '::2'

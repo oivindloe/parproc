@@ -828,6 +828,26 @@ class ProtoTest(TestCase):  # pylint: disable=too-many-public-methods
         # Restore default for other tests
         pp.set_options(name_param_separator='::')
 
+    def test_last_param_is_one_segment(self):
+        """The last placeholder matches one segment, so a longer name selects the longer proto."""
+        pp.wait_clear()
+
+        @pp.Proto(name='img::[a]')
+        def short_proc(context: pp.ProcContext, a: str) -> str:
+            return f'short_{a}'
+
+        @pp.Proto(name='img::[a]::[b]')
+        def long_proc(context: pp.ProcContext, a: str, b: str) -> str:
+            return f'long_{a}_{b}'
+
+        proc_names = pp.create('img::x::y')
+        self.assertEqual(proc_names, ['img::x::y'])
+        pp.start(*proc_names)
+        pp.wait(*proc_names)
+        self.assertEqual(pp.results()['img::x::y'], 'long_x_y')
+        self.assertIsNone(pp.get_protos()['img::[a]'].match_and_extract('img::x::y'))
+        self.assertIsNone(pp.get_protos()['img::[a]'].match_and_extract('img::'))
+
     def test_rdeps_basic(self):
         """Test basic rdeps functionality - proc with rdep gets injected as dependency"""
 

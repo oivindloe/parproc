@@ -3,6 +3,12 @@
 All notable user-facing changes to parproc will be documented in this file.
 
 
+## [0.8.1]
+
+### Fixed
+- The last `[placeholder]` in a proto name or rdep pattern now matches one non-empty segment, like the others. Before, it matched the rest of the name, separators included, so `img::[a]` also matched `img::x::y` (and `img::`), and a name could match a shorter and a longer proto at once.
+
+
 ## [0.8.0]
 
 ### Added

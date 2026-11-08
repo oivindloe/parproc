@@ -415,19 +415,13 @@ class ProcManager:  # pylint: disable=too-many-public-methods
         parts = re.split(r'(\[[^\]]+\])', rdep_pattern)
 
         pattern_parts = []
-        param_index = 0
 
         for part in parts:
             if not part:
                 continue
             if part.startswith('[') and part.endswith(']'):
-                if param_index == len(params) - 1:
-                    # Last parameter: match everything to end
-                    pattern_parts.append('.*')
-                else:
-                    # Match non-empty sequence that does not contain the separator
-                    pattern_parts.append(f'(?:(?!{re.escape(sep)}).)+')
-                param_index += 1
+                # Every placeholder, including the last, is one non-empty segment without the separator
+                pattern_parts.append(f'(?:(?!{re.escape(sep)}).)+')
             else:
                 # Literal text, escape it
                 pattern_parts.append(re.escape(part))
@@ -468,10 +462,7 @@ class ProcManager:  # pylint: disable=too-many-public-methods
                 continue
             if part.startswith('[') and part.endswith(']'):
                 param_name = params[param_index]
-                if param_index == len(params) - 1:
-                    pattern_parts.append(f'(?P<{re.escape(param_name)}>.*)')
-                else:
-                    pattern_parts.append(f'(?P<{re.escape(param_name)}>(?:(?!{re.escape(sep)}).)+)')
+                pattern_parts.append(f'(?P<{re.escape(param_name)}>(?:(?!{re.escape(sep)}).)+)')
                 param_index += 1
             else:
                 pattern_parts.append(re.escape(part))
@@ -2675,7 +2666,6 @@ class Proto:
             parts = re.split(r'(\[[^\]]+\])', self.name)
 
             pattern_parts = []
-            param_index = 0
 
             for idx, part in enumerate(parts):
                 if not part:
@@ -2694,13 +2684,8 @@ class Proto:
                             f'Pattern "{self.name}" must use the configured separator "{sep}" between '
                             f'placeholders; found "{next_literal}"'
                         )
-                    if next_literal is None:
-                        # Last parameter: match everything to end
-                        pattern_parts.append(f'(?P<{param}>.*)')
-                    else:
-                        # Match any sequence that does not contain the separator
-                        pattern_parts.append(f'(?P<{param}>(?:(?!{re.escape(sep)}).)+)')
-                    param_index += 1
+                    # Every placeholder, including the last, is one non-empty segment without the separator
+                    pattern_parts.append(f'(?P<{param}>(?:(?!{re.escape(sep)}).)+)')
                 else:
                     # Literal text, escape it
                     pattern_parts.append(re.escape(part))
